@@ -14,7 +14,7 @@ class ClaudeAPI {
     var model: String
     private let session: URLSession
 
-    init(proxyURL: String, model: String = "claude-sonnet-4-6") {
+    init(proxyURL: String, model: String = "google/gemini-3.1-flash-lite-preview") {
         self.apiURL = URL(string: proxyURL)!
         self.model = model
 
@@ -109,24 +109,26 @@ class ClaudeAPI {
 
         var request = makeAPIRequest()
 
-        // Build messages array
-        var messages: [[String: Any]] = []
+        // Build messages array in OpenAI format.
+        // System prompt goes as the first message (OpenAI doesn't have a top-level system field).
+        var messages: [[String: Any]] = [
+            ["role": "system", "content": systemPrompt]
+        ]
 
         for (userPlaceholder, assistantResponse) in conversationHistory {
             messages.append(["role": "user", "content": userPlaceholder])
             messages.append(["role": "assistant", "content": assistantResponse])
         }
 
-        // Build current message with all labeled images + prompt
+        // Build current message with all labeled images + prompt.
+        // OpenAI format uses image_url with a data URI instead of Anthropic's base64 source block.
         var contentBlocks: [[String: Any]] = []
         for image in images {
+            let mimeType = detectImageMediaType(for: image.data)
+            let base64String = image.data.base64EncodedString()
             contentBlocks.append([
-                "type": "image",
-                "source": [
-                    "type": "base64",
-                    "media_type": detectImageMediaType(for: image.data),
-                    "data": image.data.base64EncodedString()
-                ]
+                "type": "image_url",
+                "image_url": ["url": "data:\(mimeType);base64,\(base64String)"]
             ])
             contentBlocks.append([
                 "type": "text",
@@ -143,7 +145,6 @@ class ClaudeAPI {
             "model": model,
             "max_tokens": 1024,
             "stream": true,
-            "system": systemPrompt,
             "messages": messages
         ]
 
@@ -189,17 +190,14 @@ class ClaudeAPI {
             guard jsonString != "[DONE]" else { break }
 
             guard let jsonData = jsonString.data(using: .utf8),
-                  let eventPayload = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                  let eventType = eventPayload["type"] as? String else {
+                  let eventPayload = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
                 continue
             }
 
-            // We care about content_block_delta events that contain text chunks
-            if eventType == "content_block_delta",
-               let delta = eventPayload["delta"] as? [String: Any],
-               let deltaType = delta["type"] as? String,
-               deltaType == "text_delta",
-               let textChunk = delta["text"] as? String {
+            // OpenAI SSE format: { "choices": [{ "delta": { "content": "text chunk" } }] }
+            if let choices = eventPayload["choices"] as? [[String: Any]],
+               let delta = choices.first?["delta"] as? [String: Any],
+               let textChunk = delta["content"] as? String {
                 accumulatedResponseText += textChunk
                 // Send the accumulated text so far to the UI for progressive rendering
                 let currentAccumulatedText = accumulatedResponseText
@@ -222,22 +220,24 @@ class ClaudeAPI {
 
         var request = makeAPIRequest()
 
-        var messages: [[String: Any]] = []
+        // System prompt as first message (OpenAI format — no top-level system field)
+        var messages: [[String: Any]] = [
+            ["role": "system", "content": systemPrompt]
+        ]
         for (userPlaceholder, assistantResponse) in conversationHistory {
             messages.append(["role": "user", "content": userPlaceholder])
             messages.append(["role": "assistant", "content": assistantResponse])
         }
 
-        // Build current message with all labeled images + prompt
+        // Build current message with all labeled images + prompt.
+        // OpenAI format uses image_url with a data URI instead of Anthropic's base64 source block.
         var contentBlocks: [[String: Any]] = []
         for image in images {
+            let mimeType = detectImageMediaType(for: image.data)
+            let base64String = image.data.base64EncodedString()
             contentBlocks.append([
-                "type": "image",
-                "source": [
-                    "type": "base64",
-                    "media_type": detectImageMediaType(for: image.data),
-                    "data": image.data.base64EncodedString()
-                ]
+                "type": "image_url",
+                "image_url": ["url": "data:\(mimeType);base64,\(base64String)"]
             ])
             contentBlocks.append([
                 "type": "text",
@@ -253,7 +253,6 @@ class ClaudeAPI {
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 256,
-            "system": systemPrompt,
             "messages": messages
         ]
 
@@ -274,10 +273,11 @@ class ClaudeAPI {
             )
         }
 
+        // OpenAI response format: { "choices": [{ "message": { "content": "text" } }] }
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        guard let content = json?["content"] as? [[String: Any]],
-              let textBlock = content.first(where: { ($0["type"] as? String) == "text" }),
-              let text = textBlock["text"] as? String else {
+        guard let choices = json?["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let text = message["content"] as? String else {
             throw NSError(
                 domain: "ClaudeAPI",
                 code: -1,
