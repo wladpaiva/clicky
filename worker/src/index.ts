@@ -13,6 +13,13 @@ interface Env {
   OPENROUTER_API_KEY: string;
   ELEVENLABS_API_KEY: string;
   ELEVENLABS_VOICE_ID: string;
+  APP_SECRET: string;
+}
+
+function validateAuth(request: Request, env: Env): boolean {
+  const authHeader = request.headers.get("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return false;
+  return authHeader.slice("Bearer ".length).trim() === env.APP_SECRET;
 }
 
 export default {
@@ -21,6 +28,10 @@ export default {
 
     if (request.method !== "POST") {
       return new Response("Method not allowed", { status: 405 });
+    }
+
+    if (!validateAuth(request, env)) {
+      return new Response("Unauthorized", { status: 401 });
     }
 
     try {
