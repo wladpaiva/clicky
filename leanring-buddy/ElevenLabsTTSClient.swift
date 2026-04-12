@@ -62,6 +62,7 @@ final class ElevenLabsTTSClient {
         var request = URLRequest(url: proxyURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        WorkerConfig.authorizeRequest(&request)
 
         let body: [String: Any] = [
             "text": text,

@@ -22,7 +22,9 @@ struct ElevenLabsScribeTranscriptionProviderError: LocalizedError {
 final class ElevenLabsScribeTranscriptionProvider: BuddyTranscriptionProvider {
     /// URL for the Cloudflare Worker endpoint that returns a short-lived
     /// ElevenLabs Scribe single-use token. The real API key never leaves the server.
-    private static let tokenProxyURL = "https://clicky-proxy.goodies.workers.dev/transcribe-token"
+    private static var tokenProxyURL: String {
+        "\(WorkerConfig.baseURL)/transcribe-token"
+    }
 
     let displayName = "ElevenLabs Scribe"
     let requiresSpeechRecognitionPermission = false
@@ -67,6 +69,7 @@ final class ElevenLabsScribeTranscriptionProvider: BuddyTranscriptionProvider {
     private func fetchTemporaryToken() async throws -> String {
         var request = URLRequest(url: URL(string: Self.tokenProxyURL)!)
         request.httpMethod = "POST"
+        WorkerConfig.authorizeRequest(&request)
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
