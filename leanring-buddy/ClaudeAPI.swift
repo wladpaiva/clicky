@@ -41,6 +41,7 @@ class ClaudeAPI {
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        WorkerConfig.authorizeRequest(&request)
         return request
     }
 
