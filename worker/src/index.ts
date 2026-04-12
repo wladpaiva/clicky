@@ -1,19 +1,25 @@
 /**
  * Clicky Proxy Worker
  *
- * Proxies requests to Claude and ElevenLabs APIs so the app never
+ * Proxies requests to OpenRouter and ElevenLabs APIs so the app never
  * ships with raw API keys. Keys are stored as Cloudflare secrets.
  *
  * Routes:
- *   POST /chat  → Anthropic Messages API (streaming)
+ *   POST /chat  → OpenRouter Chat Completions API (streaming)
  *   POST /tts   → ElevenLabs TTS API
  */
 
 interface Env {
-  ANTHROPIC_API_KEY: string;
+  OPENROUTER_API_KEY: string;
   ELEVENLABS_API_KEY: string;
   ELEVENLABS_VOICE_ID: string;
-  ASSEMBLYAI_API_KEY: string;
+  APP_SECRET: string;
+}
+
+function validateAuth(request: Request, env: Env): boolean {
+  const authHeader = request.headers.get("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return false;
+  return authHeader.slice("Bearer ".length).trim() === env.APP_SECRET;
 }
 
 export default {
@@ -22,6 +28,10 @@ export default {
 
     if (request.method !== "POST") {
       return new Response("Method not allowed", { status: 405 });
+    }
+
+    if (!validateAuth(request, env)) {
+      return new Response("Unauthorized", { status: 401 });
     }
 
     try {
@@ -51,11 +61,10 @@ export default {
 async function handleChat(request: Request, env: Env): Promise<Response> {
   const body = await request.text();
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
+      "Authorization": `Bearer ${env.OPENROUTER_API_KEY}`,
       "content-type": "application/json",
     },
     body,
@@ -63,7 +72,7 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`[/chat] Anthropic API error ${response.status}: ${errorBody}`);
+    console.error(`[/chat] OpenRouter API error ${response.status}: ${errorBody}`);
     return new Response(errorBody, {
       status: response.status,
       headers: { "content-type": "application/json" },
@@ -81,18 +90,19 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
 
 async function handleTranscribeToken(env: Env): Promise<Response> {
   const response = await fetch(
-    "https://streaming.assemblyai.com/v3/token?expires_in_seconds=480",
+    "https://api.elevenlabs.io/v1/single-use-token/realtime_scribe",
     {
-      method: "GET",
+      method: "POST",
       headers: {
-        authorization: env.ASSEMBLYAI_API_KEY,
+        "xi-api-key": env.ELEVENLABS_API_KEY,
+        "content-type": "application/json",
       },
     }
   );
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`[/transcribe-token] AssemblyAI token error ${response.status}: ${errorBody}`);
+    console.error(`[/transcribe-token] ElevenLabs Scribe token error ${response.status}: ${errorBody}`);
     return new Response(errorBody, {
       status: response.status,
       headers: { "content-type": "application/json" },
