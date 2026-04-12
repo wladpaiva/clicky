@@ -97,16 +97,16 @@ private final class ElevenLabsScribeTranscriptionSession: NSObject, BuddyStreami
     // MARK: - Inbound message decodable types
 
     private struct ElevenLabsMessageEnvelope: Decodable {
-        let type: String
+        let message_type: String?
     }
 
     private struct ElevenLabsTranscriptMessage: Decodable {
-        let type: String
-        let transcript: String?
+        let message_type: String
+        let text: String?
     }
 
     private struct ElevenLabsErrorMessage: Decodable {
-        let type: String
+        let message_type: String
         let reason: String?
     }
 
@@ -277,14 +277,18 @@ private final class ElevenLabsScribeTranscriptionSession: NSObject, BuddyStreami
         do {
             let envelope = try JSONDecoder().decode(ElevenLabsMessageEnvelope.self, from: messageData)
 
-            switch envelope.type {
+            switch envelope.message_type {
+            case .none:
+                // ElevenLabs sent a message without a "message_type" field — log it and skip.
+                print("[ElevenLabs Scribe] ⚠️ Received message without 'message_type' field: \(text)")
+
             case "session_started":
                 // Session is ready to receive audio
                 resolveReadyContinuationIfNeeded(with: .success(()))
 
             case "partial_transcript":
                 let transcriptMessage = try JSONDecoder().decode(ElevenLabsTranscriptMessage.self, from: messageData)
-                let partialText = transcriptMessage.transcript?
+                let partialText = transcriptMessage.text?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
                 stateQueue.async {
@@ -296,7 +300,7 @@ private final class ElevenLabsScribeTranscriptionSession: NSObject, BuddyStreami
 
             case "committed_transcript":
                 let transcriptMessage = try JSONDecoder().decode(ElevenLabsTranscriptMessage.self, from: messageData)
-                let committedText = transcriptMessage.transcript?
+                let committedText = transcriptMessage.text?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
                 stateQueue.async {
@@ -306,14 +310,24 @@ private final class ElevenLabsScribeTranscriptionSession: NSObject, BuddyStreami
                     self.deliverFinalTranscriptIfNeeded(committedText)
                 }
 
+            case "commit_throttled":
+                // ElevenLabs rejected the commit because there was less than 0.3s of
+                // uncommitted audio (e.g. a very short key press). Deliver whatever partial
+                // transcript we have — or an empty string if nothing was heard — and close
+                // the session cleanly rather than propagating an error.
+                print("[ElevenLabs Scribe] ℹ️ commit_throttled — delivering partial transcript as final")
+                stateQueue.async {
+                    self.deliverFinalTranscriptIfNeeded(self.latestPartialTranscriptText)
+                }
+
             case "auth_error", "quota_exceeded", "rate_limited", "chunk_size_exceeded":
                 let errorMessage = try JSONDecoder().decode(ElevenLabsErrorMessage.self, from: messageData)
-                let errorText = errorMessage.reason ?? "ElevenLabs Scribe returned \(envelope.type)"
+                let errorText = errorMessage.reason ?? "ElevenLabs Scribe returned \(envelope.message_type ?? "unknown")"
                 failSession(with: ElevenLabsScribeTranscriptionProviderError(message: errorText))
 
             default:
-                // Other message types (e.g. insufficient_audio_activity) are silently ignored
-                break
+                // Log unrecognised message types so we can discover what ElevenLabs actually sends
+                print("[ElevenLabs Scribe] ℹ️ Unhandled message_type '\(envelope.message_type ?? "nil")': \(text)")
             }
         } catch {
             failSession(with: error)
@@ -386,8 +400,11 @@ private final class ElevenLabsScribeTranscriptionSession: NSObject, BuddyStreami
         resolveReadyContinuationIfNeeded(with: .failure(error))
 
         stateQueue.async {
+            // If we already delivered a final transcript (e.g. after commit_throttled),
+            // any subsequent socket errors are expected and should be silently ignored.
+            if self.hasDeliveredFinalTranscript { return }
+
             if self.isAwaitingCommittedTranscript
-                && !self.hasDeliveredFinalTranscript
                 && !self.latestPartialTranscriptText.isEmpty {
                 print("[ElevenLabs Scribe] ⚠️ WebSocket error during active session, delivering partial transcript as fallback: \(error.localizedDescription)")
                 self.deliverFinalTranscriptIfNeeded(self.latestPartialTranscriptText)
