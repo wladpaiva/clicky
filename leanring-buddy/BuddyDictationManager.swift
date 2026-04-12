@@ -14,69 +14,71 @@ import Foundation
 import Speech
 
 enum BuddyPushToTalkShortcut {
-    enum ShortcutOption {
-        case shiftFunction
-        case controlOption
-        case shiftControl
-        case controlOptionSpace
-        case shiftControlSpace
+    struct ShortcutConfiguration: Codable, Equatable {
+        let modifierFlagsRawValue: UInt
+        let keyCode: UInt16?
+        let keyDisplayText: String?
+        let keySentenceDisplayText: String?
+
+        init(
+            modifierFlags: NSEvent.ModifierFlags,
+            keyCode: UInt16?,
+            keyDisplayText: String? = nil,
+            keySentenceDisplayText: String? = nil
+        ) {
+            self.modifierFlagsRawValue = modifierFlags
+                .intersection(BuddyPushToTalkShortcut.supportedModifierFlags)
+                .rawValue
+            self.keyCode = keyCode
+            self.keyDisplayText = keyDisplayText
+            self.keySentenceDisplayText = keySentenceDisplayText
+        }
+
+        var modifierFlags: NSEvent.ModifierFlags {
+            NSEvent.ModifierFlags(rawValue: modifierFlagsRawValue)
+                .intersection(BuddyPushToTalkShortcut.supportedModifierFlags)
+        }
+
+        var isModifierOnlyShortcut: Bool {
+            keyCode == nil
+        }
 
         var displayText: String {
-            switch self {
-            case .shiftFunction:
-                return "shift + fn"
-            case .controlOption:
-                return "ctrl + option"
-            case .shiftControl:
-                return "shift + control"
-            case .controlOptionSpace:
-                return "ctrl + option + space"
-            case .shiftControlSpace:
-                return "shift + control + space"
-            }
+            displayLabels(sentenceCase: false).joined(separator: " + ")
         }
 
-        var keyCapsuleLabels: [String] {
-            switch self {
-            case .shiftFunction:
-                return ["shift", "fn"]
-            case .controlOption:
-                return ["ctrl", "option"]
-            case .shiftControl:
-                return ["shift", "control"]
-            case .controlOptionSpace:
-                return ["ctrl", "option", "space"]
-            case .shiftControlSpace:
-                return ["shift", "control", "space"]
-            }
+        var sentenceDisplayText: String {
+            displayLabels(sentenceCase: true).joined(separator: " + ")
         }
 
-        fileprivate var modifierOnlyFlags: NSEvent.ModifierFlags? {
-            switch self {
-            case .shiftFunction:
-                return [.shift, .function]
-            case .controlOption:
-                return [.control, .option]
-            case .shiftControl:
-                return [.shift, .control]
-            case .controlOptionSpace, .shiftControlSpace:
-                return nil
+        var isValidForPushToTalk: Bool {
+            let shortcutModifierCount = modifierFlags.shortcutModifierCount
+
+            if isModifierOnlyShortcut {
+                return shortcutModifierCount >= 2
             }
+
+            return shortcutModifierCount >= 1
         }
 
-        fileprivate var spaceShortcutModifierFlags: NSEvent.ModifierFlags? {
-            switch self {
-            case .shiftFunction:
-                return nil
-            case .controlOption:
-                return nil
-            case .shiftControl:
-                return nil
-            case .controlOptionSpace:
-                return [.control, .option]
-            case .shiftControlSpace:
-                return [.shift, .control]
+        private func displayLabels(sentenceCase: Bool) -> [String] {
+            var labels = BuddyPushToTalkShortcut.modifierDisplayLabels(
+                for: modifierFlags,
+                sentenceCase: sentenceCase
+            )
+
+            if let keyCode {
+                labels.append(
+                    BuddyPushToTalkShortcut.keyDisplayLabel(
+                        for: keyCode,
+                        storedLowercaseLabel: keyDisplayText,
+                        storedSentenceLabel: keySentenceDisplayText,
+                        sentenceCase: sentenceCase
+                    )
+                )
             }
+
+            return labels
         }
     }
 
@@ -92,10 +94,116 @@ enum BuddyPushToTalkShortcut {
         case keyUp
     }
 
-    static let currentShortcutOption: ShortcutOption = .controlOption
-    static let pushToTalkKeyCode: UInt16 = 49 // Space
-    static let pushToTalkDisplayText = currentShortcutOption.displayText
-    static let pushToTalkTooltipText = "push to talk (\(pushToTalkDisplayText))"
+    private static let selectedShortcutConfigurationUserDefaultsKey = "selectedPushToTalkShortcutOption"
+    static let supportedModifierFlags: NSEvent.ModifierFlags = [.control, .option, .shift, .command, .function]
+    static let defaultShortcutConfiguration = ShortcutConfiguration(
+        modifierFlags: [.control, .option],
+        keyCode: nil
+    )
+
+    static var selectedShortcutConfiguration: ShortcutConfiguration {
+        if
+            let storedShortcutConfigurationData = UserDefaults.standard.data(
+                forKey: selectedShortcutConfigurationUserDefaultsKey
+            ),
+            let storedShortcutConfiguration = try? JSONDecoder().decode(
+                ShortcutConfiguration.self,
+                from: storedShortcutConfigurationData
+            )
+        {
+            return storedShortcutConfiguration
+        }
+
+        if
+            let storedLegacyShortcutRawValue = UserDefaults.standard.string(
+                forKey: selectedShortcutConfigurationUserDefaultsKey
+            ),
+            let migratedShortcutConfiguration = legacyShortcutConfiguration(
+                from: storedLegacyShortcutRawValue
+            )
+        {
+            return migratedShortcutConfiguration
+        }
+
+        return defaultShortcutConfiguration
+    }
+
+    static var pushToTalkDisplayText: String {
+        selectedShortcutConfiguration.displayText
+    }
+
+    static var pushToTalkSentenceDisplayText: String {
+        selectedShortcutConfiguration.sentenceDisplayText
+    }
+
+    static var pushToTalkTooltipText: String {
+        "push to talk (\(pushToTalkDisplayText))"
+    }
+
+    static func setSelectedShortcutConfiguration(
+        _ selectedShortcutConfiguration: ShortcutConfiguration
+    ) {
+        guard
+            let encodedShortcutConfiguration = try? JSONEncoder().encode(selectedShortcutConfiguration)
+        else {
+            return
+        }
+
+        UserDefaults.standard.set(
+            encodedShortcutConfiguration,
+            forKey: selectedShortcutConfigurationUserDefaultsKey
+        )
+    }
+
+    static func normalizedModifierFlags(from modifierFlags: NSEvent.ModifierFlags) -> NSEvent.ModifierFlags {
+        modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .intersection(supportedModifierFlags)
+    }
+
+    static func capturePreviewText(for modifierFlags: NSEvent.ModifierFlags) -> String? {
+        let normalizedModifierFlags = normalizedModifierFlags(from: modifierFlags)
+        guard !normalizedModifierFlags.isEmpty else { return nil }
+
+        return modifierDisplayLabels(
+            for: normalizedModifierFlags,
+            sentenceCase: true
+        ).joined(separator: " + ")
+    }
+
+    static func capturedShortcutConfiguration(from keyDownEvent: NSEvent) -> ShortcutConfiguration? {
+        let normalizedModifierFlags = normalizedModifierFlags(from: keyDownEvent.modifierFlags)
+        guard !normalizedModifierFlags.isEmpty else { return nil }
+        guard !isModifierKeyCode(keyDownEvent.keyCode) else { return nil }
+
+        let keyDisplayLabels = keyDisplayLabels(from: keyDownEvent)
+
+        return ShortcutConfiguration(
+            modifierFlags: normalizedModifierFlags,
+            keyCode: keyDownEvent.keyCode,
+            keyDisplayText: keyDisplayLabels.lowercaseLabel,
+            keySentenceDisplayText: keyDisplayLabels.sentenceLabel
+        )
+    }
+
+    static func capturedModifierOnlyShortcutConfiguration(
+        previousModifierFlags: NSEvent.ModifierFlags,
+        currentModifierFlags: NSEvent.ModifierFlags
+    ) -> ShortcutConfiguration? {
+        let normalizedPreviousModifierFlags = normalizedModifierFlags(from: previousModifierFlags)
+        let normalizedCurrentModifierFlags = normalizedModifierFlags(from: currentModifierFlags)
+
+        guard !normalizedPreviousModifierFlags.isEmpty else { return nil }
+        guard normalizedCurrentModifierFlags != normalizedPreviousModifierFlags else { return nil }
+        guard normalizedPreviousModifierFlags.isSuperset(of: normalizedCurrentModifierFlags) else {
+            return nil
+        }
+
+        return ShortcutConfiguration(
+            modifierFlags: normalizedPreviousModifierFlags,
+            keyCode: nil
+        )
+    }
 
     static func shortcutTransition(
         for event: NSEvent,
@@ -160,10 +268,14 @@ enum BuddyPushToTalkShortcut {
         modifierFlags: NSEvent.ModifierFlags,
         wasShortcutPreviouslyPressed: Bool
     ) -> ShortcutTransition {
-        if let modifierOnlyFlags = currentShortcutOption.modifierOnlyFlags {
+        let currentSelectedShortcutConfiguration = selectedShortcutConfiguration
+        let normalizedModifierFlags = normalizedModifierFlags(from: modifierFlags)
+
+        if currentSelectedShortcutConfiguration.isModifierOnlyShortcut {
             guard shortcutEventType == .flagsChanged else { return .none }
 
-            let isShortcutCurrentlyPressed = modifierFlags.contains(modifierOnlyFlags)
+            let isShortcutCurrentlyPressed =
+                normalizedModifierFlags == currentSelectedShortcutConfiguration.modifierFlags
 
             if isShortcutCurrentlyPressed && !wasShortcutPreviouslyPressed {
                 return .pressed
@@ -176,26 +288,200 @@ enum BuddyPushToTalkShortcut {
             return .none
         }
 
-        guard let pushToTalkModifierFlags = currentShortcutOption.spaceShortcutModifierFlags else {
+        guard let configuredKeyCode = currentSelectedShortcutConfiguration.keyCode else {
             return .none
         }
 
-        let matchesModifierFlags = modifierFlags.isSuperset(of: pushToTalkModifierFlags)
+        let matchesModifierFlags =
+            normalizedModifierFlags == currentSelectedShortcutConfiguration.modifierFlags
 
         if shortcutEventType == .keyDown
-            && keyCode == pushToTalkKeyCode
+            && keyCode == configuredKeyCode
             && matchesModifierFlags
             && !wasShortcutPreviouslyPressed {
             return .pressed
         }
 
+        if shortcutEventType == .flagsChanged
+            && wasShortcutPreviouslyPressed
+            && !matchesModifierFlags {
+            return .released
+        }
+
         if shortcutEventType == .keyUp
-            && keyCode == pushToTalkKeyCode
+            && keyCode == configuredKeyCode
             && wasShortcutPreviouslyPressed {
             return .released
         }
 
         return .none
+    }
+
+    private static func legacyShortcutConfiguration(
+        from legacyShortcutRawValue: String
+    ) -> ShortcutConfiguration? {
+        switch legacyShortcutRawValue {
+        case "shiftFunction":
+            return ShortcutConfiguration(modifierFlags: [.shift, .function], keyCode: nil)
+        case "controlOption":
+            return ShortcutConfiguration(modifierFlags: [.control, .option], keyCode: nil)
+        case "shiftControl":
+            return ShortcutConfiguration(modifierFlags: [.shift, .control], keyCode: nil)
+        case "controlOptionSpace":
+            return ShortcutConfiguration(
+                modifierFlags: [.control, .option],
+                keyCode: 49,
+                keyDisplayText: "space",
+                keySentenceDisplayText: "Space"
+            )
+        case "shiftControlSpace":
+            return ShortcutConfiguration(
+                modifierFlags: [.shift, .control],
+                keyCode: 49,
+                keyDisplayText: "space",
+                keySentenceDisplayText: "Space"
+            )
+        default:
+            return nil
+        }
+    }
+
+    private static func modifierDisplayLabels(
+        for modifierFlags: NSEvent.ModifierFlags,
+        sentenceCase: Bool
+    ) -> [String] {
+        let orderedModifierLabels: [(NSEvent.ModifierFlags, String, String)] = [
+            (.control, "ctrl", "Control"),
+            (.option, "option", "Option"),
+            (.shift, "shift", "Shift"),
+            (.command, "cmd", "Command"),
+            (.function, "fn", "Fn")
+        ]
+
+        return orderedModifierLabels.compactMap { modifierFlag, lowercaseLabel, sentenceLabel in
+            guard modifierFlags.contains(modifierFlag) else { return nil }
+            return sentenceCase ? sentenceLabel : lowercaseLabel
+        }
+    }
+
+    private static func keyDisplayLabel(
+        for keyCode: UInt16,
+        storedLowercaseLabel: String?,
+        storedSentenceLabel: String?,
+        sentenceCase: Bool
+    ) -> String {
+        if sentenceCase, let storedSentenceLabel {
+            return storedSentenceLabel
+        }
+
+        if !sentenceCase, let storedLowercaseLabel {
+            return storedLowercaseLabel
+        }
+
+        let fallbackKeyDisplayLabels = fallbackKeyDisplayLabels(for: keyCode)
+        return sentenceCase
+            ? fallbackKeyDisplayLabels.sentenceLabel
+            : fallbackKeyDisplayLabels.lowercaseLabel
+    }
+
+    private static func keyDisplayLabels(from event: NSEvent) -> (lowercaseLabel: String, sentenceLabel: String) {
+        fallbackKeyDisplayLabels(for: event.keyCode)
+    }
+
+    private static func fallbackKeyDisplayLabels(
+        for keyCode: UInt16
+    ) -> (lowercaseLabel: String, sentenceLabel: String) {
+        switch keyCode {
+        case 0: return ("a", "A")
+        case 1: return ("s", "S")
+        case 2: return ("d", "D")
+        case 3: return ("f", "F")
+        case 4: return ("h", "H")
+        case 5: return ("g", "G")
+        case 6: return ("z", "Z")
+        case 7: return ("x", "X")
+        case 8: return ("c", "C")
+        case 9: return ("v", "V")
+        case 11: return ("b", "B")
+        case 12: return ("q", "Q")
+        case 13: return ("w", "W")
+        case 14: return ("e", "E")
+        case 15: return ("r", "R")
+        case 16: return ("y", "Y")
+        case 17: return ("t", "T")
+        case 18: return ("1", "1")
+        case 19: return ("2", "2")
+        case 20: return ("3", "3")
+        case 21: return ("4", "4")
+        case 22: return ("6", "6")
+        case 23: return ("5", "5")
+        case 24: return ("=", "=")
+        case 25: return ("9", "9")
+        case 26: return ("7", "7")
+        case 27: return ("-", "-")
+        case 28: return ("8", "8")
+        case 29: return ("0", "0")
+        case 30: return ("]", "]")
+        case 31: return ("o", "O")
+        case 32: return ("u", "U")
+        case 33: return ("[", "[")
+        case 34: return ("i", "I")
+        case 35: return ("p", "P")
+        case 36: return ("return", "Return")
+        case 37: return ("l", "L")
+        case 38: return ("j", "J")
+        case 39: return ("'", "'")
+        case 40: return ("k", "K")
+        case 41: return (";", ";")
+        case 42: return ("\\", "\\")
+        case 43: return (",", ",")
+        case 44: return ("/", "/")
+        case 45: return ("n", "N")
+        case 46: return ("m", "M")
+        case 47: return (".", ".")
+        case 48: return ("tab", "Tab")
+        case 49: return ("space", "Space")
+        case 50: return ("`", "`")
+        case 51: return ("delete", "Delete")
+        case 53: return ("escape", "Escape")
+        case 115: return ("home", "Home")
+        case 116: return ("page up", "Page Up")
+        case 117: return ("forward delete", "Forward Delete")
+        case 118: return ("f4", "F4")
+        case 119: return ("end", "End")
+        case 120: return ("f2", "F2")
+        case 121: return ("page down", "Page Down")
+        case 122: return ("f1", "F1")
+        case 123: return ("left arrow", "Left Arrow")
+        case 124: return ("right arrow", "Right Arrow")
+        case 125: return ("down arrow", "Down Arrow")
+        case 126: return ("up arrow", "Up Arrow")
+        default:
+            return ("key \(keyCode)", "Key \(keyCode)")
+        }
+    }
+
+    private static func isModifierKeyCode(_ keyCode: UInt16) -> Bool {
+        switch keyCode {
+        case 54, 55, 56, 57, 58, 59, 60, 61, 62, 63:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+private extension NSEvent.ModifierFlags {
+    var shortcutModifierCount: Int {
+        [
+            NSEvent.ModifierFlags.control,
+            NSEvent.ModifierFlags.option,
+            NSEvent.ModifierFlags.shift,
+            NSEvent.ModifierFlags.command,
+            NSEvent.ModifierFlags.function
+        ]
+        .filter { contains($0) }
+        .count
     }
 }
 

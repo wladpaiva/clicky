@@ -97,6 +97,10 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         }
     }
 
+    func resetShortcutPressState() {
+        isShortcutCurrentlyPressed = false
+    }
+
     private func handleGlobalEventTap(
         eventType: CGEventType,
         event: CGEvent

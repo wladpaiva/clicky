@@ -7,12 +7,19 @@
 //  like Loom's recording panel — dark, rounded, minimal, and special.
 //
 
+import AppKit
 import AVFoundation
 import SwiftUI
 
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
     @State private var emailInput: String = ""
+    @State private var isRecordingShortcut = false
+    @State private var shortcutRecordingMonitor: Any?
+    @State private var currentShortcutRecordingPreviewText: String?
+    @State private var shortcutRecordingFeedbackText: String?
+    @State private var isShortcutRecordingFeedbackWarning = false
+    @State private var previousRecordedModifierFlags: NSEvent.ModifierFlags = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -24,6 +31,14 @@ struct CompanionPanelView: View {
             permissionsCopySection
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
+
+            if companionManager.allPermissionsGranted {
+                Spacer()
+                    .frame(height: 12)
+
+                shortcutPickerRow
+                    .padding(.horizontal, 16)
+            }
 
             if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
                 Spacer()
@@ -79,6 +94,9 @@ struct CompanionPanelView: View {
         }
         .frame(width: 320)
         .background(panelBackground)
+        .onDisappear {
+            stopShortcutRecording(shouldClearFeedback: true)
+        }
     }
 
     // MARK: - Header
@@ -127,7 +145,7 @@ struct CompanionPanelView: View {
     @ViewBuilder
     private var permissionsCopySection: some View {
         if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-            Text("Hold Control+Option to talk.")
+            Text("Hold \(companionManager.pushToTalkShortcutSentenceDisplayText) to talk.")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -142,7 +160,7 @@ struct CompanionPanelView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.allPermissionsGranted {
-            Text("You're all set. Hit Start to meet Clicky.")
+            Text("You're all set. Pick your shortcut, then hit Start to meet Clicky.")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -620,6 +638,173 @@ struct CompanionPanelView: View {
             )
         }
         .padding(.vertical, 4)
+    }
+
+    private var shortcutPickerRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Shortcut")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                Button(action: {
+                    toggleShortcutRecording()
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: isRecordingShortcut ? "record.circle.fill" : "keyboard")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(isRecordingShortcut ? DS.Colors.warning : DS.Colors.textTertiary)
+
+                        Text(shortcutRecordingButtonText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(DS.Colors.textPrimary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(
+                                isRecordingShortcut ? DS.Colors.warning : DS.Colors.borderSubtle,
+                                lineWidth: 0.8
+                            )
+                    )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            }
+
+            if let shortcutRecordingFeedbackText {
+                Text(shortcutRecordingFeedbackText)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(
+                        isShortcutRecordingFeedbackWarning ? DS.Colors.warning : DS.Colors.textTertiary
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var shortcutRecordingButtonText: String {
+        if isRecordingShortcut {
+            return currentShortcutRecordingPreviewText ?? "Press your shortcut"
+        }
+
+        return companionManager.pushToTalkShortcutSentenceDisplayText
+    }
+
+    private func toggleShortcutRecording() {
+        if isRecordingShortcut {
+            stopShortcutRecording(shouldClearFeedback: true)
+        } else {
+            startShortcutRecording()
+        }
+    }
+
+    private func startShortcutRecording() {
+        stopShortcutRecording(shouldClearFeedback: false)
+
+        isRecordingShortcut = true
+        companionManager.setPushToTalkShortcutRecordingActive(true)
+        currentShortcutRecordingPreviewText = nil
+        previousRecordedModifierFlags = []
+        shortcutRecordingFeedbackText =
+            "Press your shortcut now. Press Escape to cancel. Use at least one modifier, or two modifiers for a modifier-only shortcut."
+        isShortcutRecordingFeedbackWarning = false
+
+        shortcutRecordingMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.flagsChanged, .keyDown, .keyUp]
+        ) { event in
+            handleShortcutRecording(event)
+        }
+    }
+
+    private func stopShortcutRecording(shouldClearFeedback: Bool) {
+        if let shortcutRecordingMonitor {
+            NSEvent.removeMonitor(shortcutRecordingMonitor)
+            self.shortcutRecordingMonitor = nil
+        }
+
+        isRecordingShortcut = false
+        companionManager.setPushToTalkShortcutRecordingActive(false)
+        currentShortcutRecordingPreviewText = nil
+        previousRecordedModifierFlags = []
+
+        if shouldClearFeedback {
+            shortcutRecordingFeedbackText = nil
+            isShortcutRecordingFeedbackWarning = false
+        }
+    }
+
+    private func handleShortcutRecording(_ event: NSEvent) -> NSEvent? {
+        let currentModifierFlags = BuddyPushToTalkShortcut.normalizedModifierFlags(
+            from: event.modifierFlags
+        )
+
+        switch event.type {
+        case .flagsChanged:
+            if let capturedModifierOnlyShortcutConfiguration =
+                BuddyPushToTalkShortcut.capturedModifierOnlyShortcutConfiguration(
+                    previousModifierFlags: previousRecordedModifierFlags,
+                    currentModifierFlags: currentModifierFlags
+                )
+            {
+                saveRecordedShortcutConfiguration(capturedModifierOnlyShortcutConfiguration)
+            } else {
+                currentShortcutRecordingPreviewText =
+                    BuddyPushToTalkShortcut.capturePreviewText(for: currentModifierFlags)
+                previousRecordedModifierFlags = currentModifierFlags
+            }
+
+            return nil
+        case .keyDown:
+            if event.keyCode == 53 && currentModifierFlags.isEmpty {
+                stopShortcutRecording(shouldClearFeedback: true)
+                return nil
+            }
+
+            if let capturedShortcutConfiguration =
+                BuddyPushToTalkShortcut.capturedShortcutConfiguration(from: event)
+            {
+                saveRecordedShortcutConfiguration(capturedShortcutConfiguration)
+            } else {
+                shortcutRecordingFeedbackText =
+                    "Use at least one modifier. If the shortcut is modifier-only, use at least two modifiers."
+                isShortcutRecordingFeedbackWarning = true
+            }
+
+            return nil
+        case .keyUp:
+            return nil
+        default:
+            return event
+        }
+    }
+
+    private func saveRecordedShortcutConfiguration(
+        _ recordedShortcutConfiguration: BuddyPushToTalkShortcut.ShortcutConfiguration
+    ) {
+        currentShortcutRecordingPreviewText = recordedShortcutConfiguration.sentenceDisplayText
+
+        guard recordedShortcutConfiguration.isValidForPushToTalk else {
+            shortcutRecordingFeedbackText =
+                "Use at least one modifier. If the shortcut is modifier-only, use at least two modifiers."
+            isShortcutRecordingFeedbackWarning = true
+            previousRecordedModifierFlags = []
+            return
+        }
+
+        companionManager.setSelectedPushToTalkShortcutConfiguration(recordedShortcutConfiguration)
+        shortcutRecordingFeedbackText = "Saved shortcut: \(recordedShortcutConfiguration.sentenceDisplayText)"
+        isShortcutRecordingFeedbackWarning = false
+        stopShortcutRecording(shouldClearFeedback: false)
     }
 
     private func modelOptionButton(label: String, modelID: String) -> some View {

@@ -30,6 +30,7 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var hasScreenRecordingPermission = false
     @Published private(set) var hasMicrophonePermission = false
     @Published private(set) var hasScreenContentPermission = false
+    @Published private(set) var isRecordingPushToTalkShortcutConfiguration = false
 
     /// Screen location (global AppKit coords) of a detected UI element the
     /// buddy should fly to and point at. Parsed from Claude's response;
@@ -109,6 +110,40 @@ final class CompanionManager: ObservableObject {
 
     /// The Claude model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+    @Published var selectedPushToTalkShortcutConfiguration: BuddyPushToTalkShortcut.ShortcutConfiguration =
+        BuddyPushToTalkShortcut.selectedShortcutConfiguration
+
+    var pushToTalkShortcutDisplayText: String {
+        selectedPushToTalkShortcutConfiguration.displayText
+    }
+
+    var pushToTalkShortcutSentenceDisplayText: String {
+        selectedPushToTalkShortcutConfiguration.sentenceDisplayText
+    }
+
+    func setSelectedPushToTalkShortcutConfiguration(
+        _ selectedPushToTalkShortcutConfiguration: BuddyPushToTalkShortcut.ShortcutConfiguration
+    ) {
+        self.selectedPushToTalkShortcutConfiguration = selectedPushToTalkShortcutConfiguration
+        BuddyPushToTalkShortcut.setSelectedShortcutConfiguration(selectedPushToTalkShortcutConfiguration)
+
+        stopPushToTalkShortcutActivity()
+    }
+
+    func setPushToTalkShortcutRecordingActive(_ isActive: Bool) {
+        isRecordingPushToTalkShortcutConfiguration = isActive
+
+        if isActive {
+            stopPushToTalkShortcutActivity()
+        }
+    }
+
+    private func stopPushToTalkShortcutActivity() {
+        pendingKeyboardShortcutStartTask?.cancel()
+        pendingKeyboardShortcutStartTask = nil
+        globalPushToTalkShortcutMonitor.resetShortcutPressState()
+        buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
+    }
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
@@ -471,6 +506,8 @@ final class CompanionManager: ObservableObject {
     }
 
     private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
+        guard !isRecordingPushToTalkShortcutConfiguration else { return }
+
         switch transition {
         case .pressed:
             guard !buddyDictationManager.isDictationInProgress else { return }
@@ -894,7 +931,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private func startOnboardingPromptStream() {
-        let message = "press control + option and introduce yourself"
+        let message = "press \(pushToTalkShortcutDisplayText) and introduce yourself"
         onboardingPromptText = ""
         showOnboardingPrompt = true
         onboardingPromptOpacity = 0.0
