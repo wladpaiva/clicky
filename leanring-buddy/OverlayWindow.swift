@@ -791,6 +791,7 @@ class OverlayWindowManager {
         // Create one overlay window per screen
         for screen in screens {
             let window = OverlayWindow(screen: screen)
+            window.alphaValue = 1.0
 
             let contentView = BlueCursorView(
                 screenFrame: screen.frame,

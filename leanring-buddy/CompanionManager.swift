@@ -116,11 +116,13 @@ final class CompanionManager: ObservableObject {
         claudeAPI.model = model
     }
 
-    /// User preference for whether the Clicky cursor should be shown.
-    /// When toggled off, the overlay is hidden and push-to-talk is disabled.
-    /// Persisted to UserDefaults so the choice survives app restarts.
+    /// User preference for whether the Clicky cursor should remain visible
+    /// between conversations. When false, push-to-talk still works, but the
+    /// overlay only appears transiently for the active interaction.
+    /// Persisted to UserDefaults so older users who opted into always-on
+    /// behavior keep that preference across app restarts.
     @Published var isClickyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
-        ? true
+        ? false
         : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
 
     func setClickyCursorEnabled(_ enabled: Bool) {
@@ -183,10 +185,10 @@ final class CompanionManager: ObservableObject {
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
 
-        // If the user already completed onboarding AND all permissions are
-        // still granted, show the cursor overlay immediately. If permissions
-        // were revoked (e.g. signing change), don't show the cursor — the
-        // panel will show the permissions UI instead.
+        // If the user explicitly prefers the always-visible cursor and all
+        // permissions are still granted, restore that mode on launch.
+        // Otherwise stay hidden and let push-to-talk summon the overlay
+        // only for the active conversation.
         if hasCompletedOnboarding && allPermissionsGranted && isClickyCursorEnabled {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
@@ -203,7 +205,8 @@ final class CompanionManager: ObservableObject {
         NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
 
         // Mark onboarding as completed so the Start button won't appear
-        // again on future launches — the cursor will auto-show instead
+        // again on future launches. The default experience stays hidden
+        // until the user starts a conversation with the shortcut.
         hasCompletedOnboarding = true
 
         ClickyAnalytics.trackOnboardingStarted()
@@ -381,7 +384,8 @@ final class CompanionManager: ObservableObject {
                     UserDefaults.standard.set(true, forKey: "hasScreenContentPermission")
                     ClickyAnalytics.trackPermissionGranted(permission: "screen_content")
 
-                    // If onboarding was already completed, show the cursor overlay now
+                    // If onboarding was already completed and the user opted
+                    // into always-on mode, restore the persistent overlay now.
                     if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isClickyCursorEnabled {
                         overlayWindowManager.hasShownOverlayBefore = true
                         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
@@ -725,7 +729,7 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// If the cursor is in transient mode (user toggled "Show Clicky" off),
+    /// If the cursor is in transient mode,
     /// waits for TTS playback and any pointing animation to finish, then
     /// fades out the overlay after a 1-second pause. Cancelled automatically
     /// if the user starts another push-to-talk interaction.
