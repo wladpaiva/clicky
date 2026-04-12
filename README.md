@@ -119,7 +119,7 @@ The app will appear in your menu bar (not the dock). Click the icon to open the 
 ### Permissions the app needs
 
 - **Microphone** — for push-to-talk voice capture
-- **Accessibility** — for the global keyboard shortcut (Control + Option)
+- **Accessibility** — for the global keyboard shortcut you choose in the panel
 - **Screen Recording** — for taking screenshots when you use the hotkey
 - **Screen Content** — for ScreenCaptureKit access
 
