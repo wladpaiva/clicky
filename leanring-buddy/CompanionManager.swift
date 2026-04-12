@@ -146,11 +146,13 @@ final class CompanionManager: ObservableObject {
         claudeAPI.model = model
     }
 
-    /// User preference for whether the Clicky cursor should be shown.
-    /// When toggled off, the overlay is hidden and push-to-talk is disabled.
-    /// Persisted to UserDefaults so the choice survives app restarts.
+    /// User preference for whether the Clicky cursor should remain visible
+    /// between conversations. When false, push-to-talk still works, but the
+    /// overlay only appears transiently for the active interaction.
+    /// Persisted to UserDefaults so older users who opted into always-on
+    /// behavior keep that preference across app restarts.
     @Published var isClickyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
-        ? true
+        ? false
         : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
 
     func setClickyCursorEnabled(_ enabled: Bool) {
@@ -187,10 +189,10 @@ final class CompanionManager: ObservableObject {
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
 
-        // If the user already completed onboarding AND all permissions are
-        // still granted, show the cursor overlay immediately. If permissions
-        // were revoked (e.g. signing change), don't show the cursor — the
-        // panel will show the permissions UI instead.
+        // If the user explicitly prefers the always-visible cursor and all
+        // permissions are still granted, restore that mode on launch.
+        // Otherwise stay hidden and let push-to-talk summon the overlay
+        // only for the active conversation.
         if hasCompletedOnboarding && allPermissionsGranted && isClickyCursorEnabled {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
@@ -207,7 +209,8 @@ final class CompanionManager: ObservableObject {
         NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
 
         // Mark onboarding as completed so the Start button won't appear
-        // again on future launches — the cursor will auto-show instead
+        // again on future launches. The default experience stays hidden
+        // until the user starts a conversation with the shortcut.
         hasCompletedOnboarding = true
 
         ClickyAnalytics.trackOnboardingStarted()
@@ -385,7 +388,8 @@ final class CompanionManager: ObservableObject {
                     UserDefaults.standard.set(true, forKey: "hasScreenContentPermission")
                     ClickyAnalytics.trackPermissionGranted(permission: "screen_content")
 
-                    // If onboarding was already completed, show the cursor overlay now
+                    // If onboarding was already completed and the user opted
+                    // into always-on mode, restore the persistent overlay now.
                     if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isClickyCursorEnabled {
                         overlayWindowManager.hasShownOverlayBefore = true
                         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
@@ -569,17 +573,20 @@ final class CompanionManager: ObservableObject {
 
     don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at. but if there's a specific UI element, menu, button, or area on screen that's relevant to what you're helping with, point at it.
 
-    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
+    when you point, embed the coordinate tag INLINE in your response, immediately after the words that name or describe the element — NOT at the end. the cursor will fly to the element at the exact moment you mention it during playback. you can include multiple tags in one response if you mention several elements.
+
+    the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
 
     format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
 
-    if pointing wouldn't help, append [POINT:none].
+    if pointing wouldn't help anywhere in the response, include [POINT:none] at the very end.
 
     examples:
-    - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
+    - user asks how to color grade in final cut: "you'll want to open the color inspector [POINT:1100,42:color inspector] — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves."
     - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
-    - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
-    - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
+    - user asks how to commit in xcode: "see that source control menu [POINT:285,11:source control] up top? click that and hit commit, or you can use command option c as a shortcut."
+    - user asks how to commit and push: "hit source control [POINT:285,11:source control] up top and choose commit, then after that you can push from the same menu [POINT:285,11:source control] — or use command option c then command option x."
+    - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window [POINT:400,300:terminal:screen2]?"
     """
 
     // MARK: - AI Response Pipeline
@@ -628,31 +635,34 @@ final class CompanionManager: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
-                // Parse the [POINT:...] tag from Claude's response
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+                // Strip all [POINT:...] tags from Claude's response and collect the
+                // coordinates. Tags may appear anywhere inline (not just at the end),
+                // so we scan the whole string. The textFraction on each tag tells us
+                // how far through the audio the cursor should fly to that element.
+                let parseResult = Self.parseAllPointingTags(from: fullResponseText)
                 let spokenText = parseResult.spokenText
 
-                // Handle element pointing if Claude returned coordinates.
-                // Switch to idle BEFORE setting the location so the triangle
-                // becomes visible and can fly to the target. Without this, the
-                // spinner hides the triangle and the flight animation is invisible.
-                let hasPointCoordinate = parseResult.coordinate != nil
-                if hasPointCoordinate {
-                    voiceState = .idle
-                }
+                // For each pointing tag, convert the screenshot-pixel coordinate to
+                // an AppKit global screen coordinate upfront (before TTS starts), then
+                // capture it in a closure that will fire at the precise moment the
+                // ElevenLabs alignment data shows that character being spoken.
+                var timedPointCallbacks: [ElevenLabsTTSClient.TimedPointCallback] = []
 
-                // Pick the screen capture matching Claude's screen number,
-                // falling back to the cursor screen if not specified.
-                let targetScreenCapture: CompanionScreenCapture? = {
-                    if let screenNumber = parseResult.screenNumber,
-                       screenNumber >= 1 && screenNumber <= screenCaptures.count {
-                        return screenCaptures[screenNumber - 1]
-                    }
-                    return screenCaptures.first(where: { $0.isCursorScreen })
-                }()
+                for tag in parseResult.pointingTags {
+                    guard let pointCoordinate = tag.coordinate else { continue }
 
-                if let pointCoordinate = parseResult.coordinate,
-                   let targetScreenCapture {
+                    // Pick the screen capture matching Claude's screen number,
+                    // falling back to the cursor screen if not specified.
+                    let targetScreenCapture: CompanionScreenCapture? = {
+                        if let screenNumber = tag.screenNumber,
+                           screenNumber >= 1 && screenNumber <= screenCaptures.count {
+                            return screenCaptures[screenNumber - 1]
+                        }
+                        return screenCaptures.first(where: { $0.isCursorScreen })
+                    }()
+
+                    guard let targetScreenCapture else { continue }
+
                     // Claude's coordinates are in the screenshot's pixel space
                     // (top-left origin, e.g. 1280x831). Scale to the display's
                     // point space (e.g. 1512x982), then convert to AppKit global coords.
@@ -679,16 +689,27 @@ final class CompanionManager: ObservableObject {
                         y: appKitY + displayFrame.origin.y
                     )
 
-                    detectedElementScreenLocation = globalLocation
-                    detectedElementDisplayFrame = displayFrame
-                    ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
-                    print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
-                } else {
-                    print("🎯 Element pointing: \(parseResult.elementLabel ?? "no element")")
+                    let elementLabel = tag.elementLabel
+                    let characterOffset = tag.spokenTextCharacterOffset
+
+                    print("🎯 Element pointing queued at char offset \(characterOffset): (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(elementLabel ?? "element")\"")
+
+                    // Capture coordinates by value so the closure is self-contained.
+                    // The TTS client will fire this action at the exact playback timestamp
+                    // derived from the ElevenLabs character alignment data.
+                    timedPointCallbacks.append(ElevenLabsTTSClient.TimedPointCallback(
+                        spokenTextCharacterOffset: characterOffset,
+                        action: { [weak self] in
+                            guard let self else { return }
+                            self.detectedElementScreenLocation = globalLocation
+                            self.detectedElementDisplayFrame = displayFrame
+                            ClickyAnalytics.trackElementPointed(elementLabel: elementLabel)
+                        }
+                    ))
                 }
 
-                // Save this exchange to conversation history (with the point tag
-                // stripped so it doesn't confuse future context)
+                // Save this exchange to conversation history (with all point tags
+                // stripped so they don't confuse future context)
                 conversationHistory.append((
                     userTranscript: transcript,
                     assistantResponse: spokenText
@@ -703,11 +724,13 @@ final class CompanionManager: ObservableObject {
 
                 ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 
-                // Play the response via TTS. Keep the spinner (processing state)
-                // until the audio actually starts playing, then switch to responding.
+                // Play the response via TTS. Cursor-movement callbacks fire at proportional
+                // positions through the audio (e.g. a tag at 40% of the text fires 40% of
+                // the way through playback). Keep the spinner (processing state) until the
+                // audio actually starts playing, then switch to responding.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     do {
-                        try await elevenLabsTTSClient.speakText(spokenText)
+                        try await elevenLabsTTSClient.speakText(spokenText, timedPointCallbacks: timedPointCallbacks)
                         // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
                     } catch {
@@ -731,7 +754,7 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// If the cursor is in transient mode (user toggled "Show Clicky" off),
+    /// If the cursor is in transient mode,
     /// waits for TTS playback and any pointing animation to finish, then
     /// fades out the overlay after a 1-second pause. Cancelled automatically
     /// if the user starts another push-to-talk interaction.
@@ -773,59 +796,111 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Point Tag Parsing
 
-    /// Result of parsing a [POINT:...] tag from Claude's response.
-    struct PointingParseResult {
-        /// The response text with the [POINT:...] tag removed — this is what gets spoken.
-        let spokenText: String
-        /// The parsed pixel coordinate, or nil if Claude said "none" or no tag was found.
+    /// A single [POINT:x,y:label] or [POINT:x,y:label:screenN] tag extracted
+    /// from Claude's response, along with where in the spoken text it appeared.
+    struct TimedPointingTag {
+        /// The parsed pixel coordinate in screenshot space, or nil for [POINT:none].
         let coordinate: CGPoint?
-        /// Short label describing the element (e.g. "run button"), or "none".
+        /// Short label describing the element (e.g. "run button").
         let elementLabel: String?
-        /// Which screen the coordinate refers to (1-based), or nil to default to cursor screen.
+        /// Which screen the coordinate refers to (1-based), or nil to default to the cursor screen.
         let screenNumber: Int?
+        /// UTF-16 character offset into `spokenText` (the tag-stripped text sent to TTS)
+        /// at the position just before this tag. ElevenLabs alignment arrays are indexed by
+        /// character position in the text sent to their API, so this value is used to look up
+        /// the exact playback timestamp for when this element is being spoken.
+        let spokenTextCharacterOffset: Int
     }
 
-    /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
-    /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
-    static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
-        // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
-        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
+    /// Result of parsing all [POINT:...] tags out of Claude's response.
+    struct AllPointingTagsParseResult {
+        /// The full response text with every [POINT:...] tag removed — this is what gets spoken.
+        let spokenText: String
+        /// All coordinate tags found, sorted by spokenTextCharacterOffset (earliest mention first).
+        /// [POINT:none] tags are excluded (they carry no coordinate and don't move the cursor).
+        let pointingTags: [TimedPointingTag]
+    }
 
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
-              let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)) else {
-            // No tag found at all
-            return PointingParseResult(spokenText: responseText, coordinate: nil, elementLabel: nil, screenNumber: nil)
+    /// Finds and removes every [POINT:...] tag from Claude's response, regardless of position.
+    /// Returns the clean spoken text plus a list of timed tags so the cursor can fly to each
+    /// element at the exact second ElevenLabs speaks the character at `spokenTextCharacterOffset`.
+    ///
+    /// The old approach only matched a tag anchored to the end of the string (`$`), which caused
+    /// the raw tag text to be spoken aloud whenever Claude placed a tag mid-sentence or the
+    /// response had unexpected trailing content. This version scans the whole string.
+    static func parseAllPointingTags(from responseText: String) -> AllPointingTagsParseResult {
+        // Match [POINT:none] or [POINT:x,y] or [POINT:x,y:label] or [POINT:x,y:label:screenN]
+        // No $ anchor — tags may appear anywhere in the response.
+        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]"#
+
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return AllPointingTagsParseResult(spokenText: responseText, pointingTags: [])
         }
 
-        // Remove the tag from the spoken text
-        let tagRange = Range(match.range, in: responseText)!
-        let spokenText = String(responseText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let fullRange = NSRange(responseText.startIndex..., in: responseText)
+        let matches = regex.matches(in: responseText, range: fullRange)
 
-        // Check if it's [POINT:none]
-        guard match.numberOfRanges >= 3,
-              let xRange = Range(match.range(at: 1), in: responseText),
-              let yRange = Range(match.range(at: 2), in: responseText),
-              let x = Double(responseText[xRange]),
-              let y = Double(responseText[yRange]) else {
-            return PointingParseResult(spokenText: spokenText, coordinate: nil, elementLabel: "none", screenNumber: nil)
+        guard !matches.isEmpty else {
+            return AllPointingTagsParseResult(spokenText: responseText, pointingTags: [])
         }
 
-        var elementLabel: String? = nil
-        if match.numberOfRanges >= 4, let labelRange = Range(match.range(at: 3), in: responseText) {
-            elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
+        var pointingTags: [TimedPointingTag] = []
+
+        // Track how many UTF-16 code units of tag text we have removed so far.
+        // Each tag at original position P maps to spokenText position P - removedBefore.
+        var removedCharactersBeforeCurrentTag = 0
+
+        for match in matches {
+            // UTF-16 offset into the original text where this tag begins
+            let tagStartInOriginalText = match.range.location
+            let tagLengthInOriginalText = match.range.length
+
+            // The character offset in spokenText (after removing all preceding tags)
+            // where this tag appeared — i.e., where the cursor should fire.
+            let spokenTextCharacterOffset = tagStartInOriginalText - removedCharactersBeforeCurrentTag
+            removedCharactersBeforeCurrentTag += tagLengthInOriginalText
+
+            // If capture groups 1 & 2 are absent, this is [POINT:none] — skip it.
+            guard let xRange = Range(match.range(at: 1), in: responseText),
+                  let yRange = Range(match.range(at: 2), in: responseText),
+                  let x = Double(responseText[xRange]),
+                  let y = Double(responseText[yRange]) else {
+                continue
+            }
+
+            var elementLabel: String? = nil
+            if let labelRange = Range(match.range(at: 3), in: responseText) {
+                elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
+            }
+
+            var screenNumber: Int? = nil
+            if let screenRange = Range(match.range(at: 4), in: responseText) {
+                screenNumber = Int(responseText[screenRange])
+            }
+
+            pointingTags.append(TimedPointingTag(
+                coordinate: CGPoint(x: x, y: y),
+                elementLabel: elementLabel,
+                screenNumber: screenNumber,
+                spokenTextCharacterOffset: spokenTextCharacterOffset
+            ))
         }
 
-        var screenNumber: Int? = nil
-        if match.numberOfRanges >= 5, let screenRange = Range(match.range(at: 4), in: responseText) {
-            screenNumber = Int(responseText[screenRange])
+        // Build spoken text by removing all tag ranges. Iterate in reverse so
+        // removing one range doesn't shift the indices of the remaining ranges.
+        var spokenText = responseText
+        for match in matches.reversed() {
+            if let tagRange = Range(match.range, in: spokenText) {
+                spokenText.removeSubrange(tagRange)
+            }
         }
+        spokenText = spokenText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return PointingParseResult(
-            spokenText: spokenText,
-            coordinate: CGPoint(x: x, y: y),
-            elementLabel: elementLabel,
-            screenNumber: screenNumber
-        )
+        // Tags are already in document order (matches returns them sorted by location),
+        // but sort explicitly to be safe.
+        let sortedPointingTags = pointingTags.sorted { $0.spokenTextCharacterOffset < $1.spokenTextCharacterOffset }
+
+        return AllPointingTagsParseResult(spokenText: spokenText, pointingTags: sortedPointingTags)
     }
 
     // MARK: - Onboarding Video
@@ -995,9 +1070,11 @@ final class CompanionManager: ObservableObject {
                     onTextChunk: { _ in }
                 )
 
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+                let parseResult = Self.parseAllPointingTags(from: fullResponseText)
 
-                guard let pointCoordinate = parseResult.coordinate else {
+                // Onboarding always points at exactly one element — take the first tag found
+                guard let firstTag = parseResult.pointingTags.first,
+                      let pointCoordinate = firstTag.coordinate else {
                     print("🎯 Onboarding demo: no element to point at")
                     return
                 }
@@ -1023,7 +1100,7 @@ final class CompanionManager: ObservableObject {
                 detectedElementBubbleText = parseResult.spokenText
                 detectedElementScreenLocation = globalLocation
                 detectedElementDisplayFrame = displayFrame
-                print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
+                print("🎯 Onboarding demo: pointing at \"\(firstTag.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
             } catch {
                 print("⚠️ Onboarding demo error: \(error)")
             }
