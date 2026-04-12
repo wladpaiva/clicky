@@ -109,14 +109,16 @@ async function handleTTS(request: Request, env: Env): Promise<Response> {
   const body = await request.text();
   const voiceId = env.ELEVENLABS_VOICE_ID;
 
+  // Use /with-timestamps so the app receives character-level alignment data
+  // alongside the audio. The app uses alignment to trigger cursor movements
+  // at the exact moment each UI element is mentioned in speech.
   const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/with-timestamps`,
     {
       method: "POST",
       headers: {
         "xi-api-key": env.ELEVENLABS_API_KEY,
         "content-type": "application/json",
-        accept: "audio/mpeg",
       },
       body,
     }
@@ -134,7 +136,7 @@ async function handleTTS(request: Request, env: Env): Promise<Response> {
   return new Response(response.body, {
     status: response.status,
     headers: {
-      "content-type": response.headers.get("content-type") || "audio/mpeg",
+      "content-type": "application/json",
     },
   });
 }
